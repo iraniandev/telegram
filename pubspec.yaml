@@ -95,3 +95,7 @@ flutter:
   #
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package
+
+  dependency_overrides:
+  shared_preferences_android: 2.4.0
+  shared_preferences: 2.5.0
