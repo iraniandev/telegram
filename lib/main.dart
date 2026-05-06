@@ -2,7 +2,6 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:html/parser.dart' as html_parser;
 import 'package:path_provider/path_provider.dart';
@@ -23,15 +22,15 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       title: 'EzyTel Pro',
       debugShowCheckedModeBanner: false,
-      theme: _liquidGlassTheme(),
+      theme: _purpleTheme(),
       home: const HomeScreen(),
     );
   }
 
-  ThemeData _liquidGlassTheme() {
+  ThemeData _purpleTheme() {
     return ThemeData(
       brightness: Brightness.dark,
-      primaryColor: Colors.purple, // تغییر به بنفش
+      primaryColor: Colors.purple,
       scaffoldBackgroundColor: Colors.black,
       appBarTheme: const AppBarTheme(
         backgroundColor: Colors.transparent,
@@ -58,22 +57,30 @@ class MyApp extends StatelessWidget {
   }
 }
 
-// ========================== سرویس ==========================
+// ============================================================================
+// سرویس اصلی برنامه (پیشرفته، منطق teleMirror کامل)
+// ============================================================================
 class TelegramService {
   static late Directory cacheDir;
-  static const List<String> googleDomains = [
-    'www.google.com',
-    'safebrowsing.google.com',
-    'images.google.com',
-    'maps.google.com',
-    'news.google.com',
-    'scholar.google.com',
-    'meet.google.com',
-    'mail.google.com',
-    'drive.google.com',
-  ];
-  static final Random _random = Random();
   static late SharedPreferences _prefs;
+  static final Random _random = Random();
+  static DateTime _lastRequestTime = DateTime.now();
+  static const int _minRequestInterval = 1000;
+
+  // متدهای پروکسی (مثل teleMirror)
+  static const List<String> _proxyMethods = ['google', 'google2', 'google3', 'google4', 'direct'];
+  static const Map<String, String> _googleIPs = {
+    'google': '216.239.38.120',
+    'google2': '142.250.191.196',
+    'google3': '142.250.184.196',
+    'google4': '142.250.74.14',
+  };
+  static const List<String> _userAgents = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+  ];
 
   static Future<void> init() async {
     final appDir = await getApplicationDocumentsDirectory();
@@ -82,18 +89,41 @@ class TelegramService {
     _prefs = await SharedPreferences.getInstance();
   }
 
-  static String _pickRandomDomain() => googleDomains[_random.nextInt(googleDomains.length)];
+  // ============== متد اصلی دریافت محتوا با چندین روش ==============
+  static Future<String> fetchContent(String chid, {String? before}) async {
+    String params = chid;
+    if (before != null && before.isNotEmpty && before != '0') params = '$chid?before=$before';
+    for (int retry = 0; retry < _proxyMethods.length; retry++) {
+      final method = _proxyMethods[retry];
+      try {
+        await _applyRateLimit();
+        final result = await _fetchWithMethod(params, method);
+        if (result != null && result.isNotEmpty && !result.startsWith('ERROR')) {
+          // اگر محتوا از پروکسی گرفته شد، آن را برگردان
+          print('Success with method: $method');
+          return result;
+        }
+      } catch (e) {
+        print('Method $method failed: $e');
+      }
+      // منتظر بمان قبل از تلاش بعدی (فاصله زمانی)
+      await Future.delayed(Duration(seconds: 2 * (retry + 1)));
+    }
+    // اگر همه متدهای پروکسی شکست خوردند، از گیت‌هاب یا کش استفاده کن
+    throw Exception('Failed to load content from all sources');
+  }
 
-  static Future<String?> _fetchFromTelegram(String params) async {
-    final domain = _pickRandomDomain();
-    String url = 'https://$domain/s/$params';
-    url += url.contains('?') ? '&' : '?';
-    url += '_x_tr_sl=el&_x_tr_tl=en&_x_tr_hl=en&_x_tr_pto=wapp';
+  static Future<String?> _fetchWithMethod(String params, String method) async {
+    if (method == 'direct') return await _fetchDirect(params);
+    return await _fetchGoogleProxy(params, method);
+  }
+
+  static Future<String?> _fetchDirect(String params) async {
+    final url = 'https://t.me/s/$params';
     try {
       final response = await http.get(Uri.parse(url), headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Pragma': 'no-cache',
-        'Cache-Control': 'no-cache',
+        'User-Agent': _getRandomUserAgent(),
+        'Accept-Language': 'en-US,en;q=0.9',
       });
       if (response.statusCode == 200) return response.body;
       return null;
@@ -102,6 +132,46 @@ class TelegramService {
     }
   }
 
+  static Future<String?> _fetchGoogleProxy(String params, String method) async {
+    final originalUrl = 'https://t.me/s/$params';
+    final uri = Uri.parse(originalUrl);
+    final fullPath = '${uri.path}${uri.hasQuery ? '?${uri.query}' : ''}';
+    // ساخت آدرس پروکسی گوگل ترنسلیت با ساب‌دامین t-me
+    final proxyUrl = 'https://t-me.translate.goog$fullPath?_x_tr_sl=auto&_x_tr_tl=fa&_x_tr_hl=en&_x_tr_pto=wapp';
+    try {
+      final client = http.Client();
+      final request = http.Request('GET', Uri.parse(proxyUrl));
+      request.headers['User-Agent'] = _getRandomUserAgent();
+      request.headers['Host'] = 't-me.translate.goog';
+      request.headers['Referer'] = 'https://translate.google.com/';
+      request.headers['Origin'] = 'https://translate.google.com';
+      request.headers['Accept-Language'] = 'en-US,en;q=0.9,fa;q=0.8';
+      request.headers['Pragma'] = 'no-cache';
+      request.headers['Cache-Control'] = 'no-cache';
+      final streamedResponse = await request.send();
+      final response = await http.Response.fromStream(streamedResponse);
+      client.close();
+      if (response.statusCode == 200 && response.body.contains('</main>')) {
+        return response.body;
+      }
+      return null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  static Future<void> _applyRateLimit() async {
+    final now = DateTime.now();
+    final diff = now.difference(_lastRequestTime).inMilliseconds;
+    if (diff < _minRequestInterval) {
+      await Future.delayed(Duration(milliseconds: _minRequestInterval - diff));
+    }
+    _lastRequestTime = DateTime.now();
+  }
+
+  static String _getRandomUserAgent() => _userAgents[_random.nextInt(_userAgents.length)];
+
+  // ============== Fallback به گیت‌هاب (teleFeed) ==============
   static Future<Map<String, dynamic>?> _fetchFromGitHub(String chid) async {
     final url = 'https://raw.githubusercontent.com/ircfspace/teleFeed/refs/heads/export/${chid.toLowerCase()}.json';
     try {
@@ -116,25 +186,78 @@ class TelegramService {
     }
   }
 
+  // ============== دریافت اطلاعات کانال (نام، آواتار، آخرین پست) ==============
   static Future<Map<String, dynamic>> fetchChannelInfo(String chid) async {
-    final html = await _fetchFromTelegram(chid);
-    if (html != null && html.contains('<meta property="og:title"')) {
-      return _parseChannelInfoFromHtml(chid, html);
+    // اول سعی کن از پروکسی بگیر
+    try {
+      final html = await fetchContent(chid);
+      if (html.isNotEmpty && html.contains('<meta property="og:title"')) {
+        return _parseChannelInfoFromHtml(chid, html);
+      }
+    } catch (e) {
+      print('Proxy failed for info, trying GitHub');
     }
+    // Fallback به گیت‌هاب
     final githubData = await _fetchFromGitHub(chid);
     if (githubData != null) {
       return _convertGitHubToChannelInfo(chid, githubData);
     }
-    throw Exception('Channel not accessible via any source');
+    throw Exception('Cannot fetch channel info from any source');
   }
 
-  static Future<String> fetchMessagesHtml(String chid, {String? before}) async {
-    String params = chid;
-    if (before != null && before.isNotEmpty && before != '0') params = '$chid?before=$before';
-    final html = await _fetchFromTelegram(params);
-    if (html != null && !html.startsWith('ERROR') && html.contains('</main>')) {
-      return _processTelegramHtml(chid, html, before: before);
+  static Future<Map<String, dynamic>> _parseChannelInfoFromHtml(String chid, String html) async {
+    final document = html_parser.parse(html);
+    final result = <String, dynamic>{};
+    final title = document.querySelector('meta[property="og:title"]');
+    result['name'] = title?.attributes['content'] ?? chid;
+    final ogImage = document.querySelector('meta[property="og:image"]');
+    if (ogImage != null) {
+      final imgUrl = ogImage.attributes['content'];
+      if (imgUrl != null && imgUrl.isNotEmpty) {
+        final hash = _md5(imgUrl);
+        final filename = '$hash.jpg';
+        await _downloadImage(imgUrl, filename);
+        result['avatar'] = '${cacheDir.path}/$filename';
+      }
     }
+    final lastPost = document.querySelector('.tgme_widget_message');
+    if (lastPost != null) {
+      final textElem = lastPost.querySelector('.tgme_widget_message_text');
+      result['desc'] = textElem?.text.trim() ?? '📎 Media';
+      final timeElem = lastPost.querySelector('time');
+      if (timeElem != null && timeElem.attributes['datetime'] != null) {
+        final dt = DateTime.parse(timeElem.attributes['datetime']!);
+        result['datestr'] = _toPersianDate(dt);
+      }
+    }
+    // ذخیره کش
+    final cacheFile = File('${cacheDir.path}/${chid}_info.json');
+    await cacheFile.writeAsString(jsonEncode(result));
+    return result;
+  }
+
+  static Map<String, dynamic> _convertGitHubToChannelInfo(String chid, Map<String, dynamic> githubData) {
+    final info = githubData['info'] ?? {};
+    return {
+      'name': info['title'] ?? info['username'] ?? chid,
+      'avatar': info['photo_url'],
+      'desc': githubData['posts']?.isNotEmpty == true ? githubData['posts'][0]['message']?.substring(0, 100) : 'No description',
+      'datestr': githubData['posts']?.isNotEmpty == true ? _toPersianDate(DateTime.tryParse(githubData['posts'][0]['date']) ?? DateTime.now()) : '',
+    };
+  }
+
+  // ============== دریافت HTML پیام‌ها ==============
+  static Future<String> fetchMessagesHtml(String chid, {String? before}) async {
+    // اول از پروکسی بگیر
+    try {
+      final html = await fetchContent(chid, before: before);
+      if (html.isNotEmpty && html.contains('</main>')) {
+        return _processTelegramHtml(chid, html, before: before);
+      }
+    } catch (e) {
+      print('Proxy failed for messages, trying GitHub');
+    }
+    // Fallback به گیت‌هاب
     final githubData = await _fetchFromGitHub(chid);
     if (githubData != null && githubData['posts'] != null) {
       return _convertGitHubToHtml(githubData);
@@ -144,6 +267,7 @@ class TelegramService {
 
   static Future<String> _processTelegramHtml(String chid, String html, {String? before}) async {
     String processedHtml = html;
+    // جایگزینی تصاویر با مسیر محلی
     final imgRegex = RegExp(r'<img\s+[^>]*src="https://([^"]+)"');
     for (final match in imgRegex.allMatches(processedHtml)) {
       final fullTag = match.group(0)!;
@@ -154,7 +278,7 @@ class TelegramService {
       final localPath = '${cacheDir.path}/$filename';
       processedHtml = processedHtml.replaceFirst(fullTag, fullTag.replaceFirst('https://$imgUrl', localPath));
     }
-
+    // تبدیل تاریخ
     final timeRegex = RegExp(r'<time datetime="([^"]+)"');
     for (final match in timeRegex.allMatches(processedHtml)) {
       final dtStr = match.group(1)!;
@@ -165,12 +289,12 @@ class TelegramService {
         '<span style="color:#888;font-size:12px;">$persianDate</span>',
       );
     }
-
+    // استخراج بخش اصلی
     final headerEnd = processedHtml.indexOf('</header>');
     final mainEnd = processedHtml.indexOf('</main>');
-    if (headerEnd == -1 || mainEnd == -1) throw Exception('Invalid structure');
+    if (headerEnd == -1 || mainEnd == -1) throw Exception('Invalid HTML structure');
     String content = processedHtml.substring(headerEnd + 9, mainEnd + 7);
-
+    // لینک لود بیشتر
     final moreMatch = RegExp(r'data-before="([^"]+)"').firstMatch(content);
     if (moreMatch != null) {
       final beforeValue = moreMatch.group(1)!;
@@ -180,7 +304,7 @@ class TelegramService {
       );
     }
     content = content.replaceAll(RegExp(r'<a[^>]*data-after[^>]*>.*?</a>', dotAll: true), '');
-
+    // اگر صفحه اول بود، هدر کانال را اضافه کن
     if (before == null || before.isEmpty || before == '0') {
       final docFull = html_parser.parse(html);
       final channelName = docFull.querySelector('.tgme_header_title')?.text.trim() ?? chid;
@@ -205,17 +329,6 @@ class TelegramService {
     return content;
   }
 
-  static Map<String, dynamic> _convertGitHubToChannelInfo(String chid, Map<String, dynamic> githubData) {
-    final info = githubData['info'] ?? {};
-    return {
-      'name': info['title'] ?? info['username'] ?? chid,
-      'avatar': info['photo_url'],
-      'desc': githubData['posts']?.isNotEmpty == true ? githubData['posts'][0]['message']?.substring(0, 100) : 'No description',
-      'datestr': githubData['posts']?.isNotEmpty == true ? _toPersianDate(DateTime.tryParse(githubData['posts'][0]['date']) ?? DateTime.now()) : '',
-      'newmsg': '',
-    };
-  }
-
   static String _convertGitHubToHtml(Map<String, dynamic> githubData) {
     final posts = githubData['posts'] as List?;
     if (posts == null || posts.isEmpty) return '<div>No posts available</div>';
@@ -233,46 +346,18 @@ class TelegramService {
     return buffer.toString();
   }
 
-  static Future<Map<String, dynamic>> _parseChannelInfoFromHtml(String chid, String html) async {
-    final document = html_parser.parse(html);
-    final result = <String, dynamic>{};
-    final title = document.querySelector('meta[property="og:title"]');
-    result['name'] = title?.attributes['content'] ?? chid;
-    final ogImage = document.querySelector('meta[property="og:image"]');
-    if (ogImage != null) {
-      final imgUrl = ogImage.attributes['content'];
-      if (imgUrl != null && imgUrl.isNotEmpty) {
-        final hash = _md5(imgUrl);
-        final filename = '$hash.jpg';
-        if (await _downloadImage(imgUrl, filename)) result['avatar'] = '${cacheDir.path}/$filename';
-      }
-    }
-    final lastPost = document.querySelector('.tgme_widget_message');
-    if (lastPost != null) {
-      final textElem = lastPost.querySelector('.tgme_widget_message_text');
-      result['desc'] = textElem?.text.trim() ?? '📎 Media';
-      final timeElem = lastPost.querySelector('time');
-      if (timeElem != null && timeElem.attributes['datetime'] != null) {
-        final dt = DateTime.parse(timeElem.attributes['datetime']!);
-        result['datestr'] = _toPersianDate(dt);
-      }
-    }
-    return result;
-  }
-
-  static Future<bool> _downloadImage(String url, String filename) async {
+  static Future<void> _downloadImage(String url, String filename) async {
     final file = File('${cacheDir.path}/$filename');
-    if (await file.exists()) return true;
+    if (await file.exists()) return;
     try {
       final response = await http.get(Uri.parse(url));
       if (response.statusCode == 200) {
         await file.writeAsBytes(response.bodyBytes);
-        return true;
       }
-    } catch (_) {}
-    return false;
+    } catch (e) {}
   }
 
+  // ============== مدیریت لیست کانال‌ها (SharedPreferences) ==============
   static Future<List<String>> getSavedChannels() async => _prefs.getStringList('channels') ?? [];
   static Future<void> addChannel(String chid) async {
     final list = await getSavedChannels();
@@ -288,6 +373,7 @@ class TelegramService {
   }
   static Future<void> updateChannelsOrder(List<String> newOrder) async => await _prefs.setStringList('channels', newOrder);
 
+  // ============== توابع کمکی ==============
   static String _md5(String input) => base64Url.encode(utf8.encode(input)).substring(0, 16);
   static String _toPersianDate(DateTime dt) {
     final (jy, jm, jd) = _gregorianToJalali(dt.year, dt.month, dt.day);
@@ -318,6 +404,9 @@ class TelegramService {
   }
 }
 
+// ============================================================================
+// مدل کانال
+// ============================================================================
 class ChannelItem {
   final String id;
   String name;
@@ -328,6 +417,9 @@ class ChannelItem {
   ChannelItem({required this.id, required this.name, this.avatarPath, this.lastMessage, this.lastDate, this.unreadCount = 0});
 }
 
+// ============================================================================
+// صفحه اصلی (UI بنفش، قابلیت پین، حذف، اضافه)
+// ============================================================================
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
   @override
@@ -414,7 +506,17 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  void _showSearchDialog() {
+  Future<void> _reorderChannels(int oldIndex, int newIndex) async {
+    if (oldIndex == newIndex) return;
+    setState(() {
+      final item = _channels.removeAt(oldIndex);
+      _channels.insert(newIndex, item);
+    });
+    final newOrderIds = _channels.map((c) => c.id).toList();
+    await TelegramService.updateChannelsOrder(newOrderIds);
+  }
+
+  void _showAddDialog() {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
@@ -442,16 +544,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Future<void> _reorderChannels(int oldIndex, int newIndex) async {
-    if (oldIndex == newIndex) return;
-    setState(() {
-      final item = _channels.removeAt(oldIndex);
-      _channels.insert(newIndex, item);
-    });
-    final newOrderIds = _channels.map((c) => c.id).toList();
-    await TelegramService.updateChannelsOrder(newOrderIds);
-  }
-
   @override
   Widget build(BuildContext context) {
     final filtered = _channels.where((c) => c.name.toLowerCase().contains(_searchQuery.toLowerCase()) || c.id.toLowerCase().contains(_searchQuery.toLowerCase())).toList();
@@ -461,15 +553,11 @@ class _HomeScreenState extends State<HomeScreen> {
         title: const Text('EzyTel Pro'),
         backgroundColor: Colors.transparent,
         elevation: 0,
-        actions: [IconButton(icon: const Icon(Icons.search), onPressed: _showSearchDialog)],
+        actions: [IconButton(icon: const Icon(Icons.search), onPressed: _showAddDialog)],
       ),
       body: Container(
         decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [Colors.black, Colors.grey[900]!],
-          ),
+          gradient: LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Colors.black, Colors.grey[900]!]),
         ),
         child: _isLoading
             ? const Center(child: CircularProgressIndicator())
@@ -542,11 +630,14 @@ class _HomeScreenState extends State<HomeScreen> {
                 ],
               ),
       ),
-      floatingActionButton: FloatingActionButton(onPressed: _showSearchDialog, backgroundColor: Colors.purple, child: const Icon(Icons.add)),
+      floatingActionButton: FloatingActionButton(onPressed: _showAddDialog, backgroundColor: Colors.purple, child: const Icon(Icons.add)),
     );
   }
 }
 
+// ============================================================================
+// ویجت نمایش ساده HTML
+// ============================================================================
 class HtmlWidget extends StatelessWidget {
   final String html;
   const HtmlWidget({super.key, required this.html});
