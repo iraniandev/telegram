@@ -23,8 +23,6 @@ dev_dependencies:
 
 flutter:
     uses-material-design: true
-  assets:
-    - assets/channels.txt
 
 dependency_overrides:
   shared_preferences_android: 2.4.0
